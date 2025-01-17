@@ -1,6 +1,7 @@
 openai-key.txt
 data.zip
 data
+repos
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
