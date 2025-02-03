@@ -3,6 +3,7 @@ from hityper.typeobject import TypeObject
 import csv
 import re, os
 import argparse
+from typet5.type_check import parse_type_str
 
 
 def match_type_for_cot(string):
@@ -93,7 +94,7 @@ def transform_sample_to_top(data, cot = False, case_sensitive = True):
             freq[found] += 1
         else:
             freq[d] = 1
-    
+
     sorted_freq = sorted(freq.items(), key=lambda x: x[1], reverse=True)
     top = []
     for s in sorted_freq:
@@ -103,9 +104,14 @@ def transform_sample_to_top(data, cot = False, case_sensitive = True):
 
 
 
-def evaluate(resfile, testset, detail = False, n = 5, batch = False, cot = False, sample = True, csv_file = None, exact = True, res_file = None, completion = False):
+def evaluate(resfile, testset, detail = False, n = 10, batch = False, cot = False, sample = True, csv_file = None, exact = True, res_file = None, completion = False):
     results = json.loads(open(resfile, 'r').read())
     testset = json.loads(open(testset, 'r').read())
+    with open("data/new_testset.json", "r") as f:
+        new_testset = json.load(f)
+
+    total_num = 0
+
     reses = {}
     topn = {}
     empty = 0
@@ -138,6 +144,21 @@ def evaluate(resfile, testset, detail = False, n = 5, batch = False, cot = False
         if r not in testset:
             empty += 1
             continue
+
+        new_test = None
+        for nt in new_testset:
+            nt_name = nt["file"] + "--" + nt["loc"] + "--" + nt["name"] + "--" + nt["scope"]
+            if nt_name == r:
+                new_test = nt
+                break
+
+        if new_test == None:
+            continue
+
+        assert new_test != None
+
+        total_num += 1
+
         gttype = TypeObject.Str2Obj(testset[r][1])
         total["total"] += 1
         total[testset[r][2]] += 1
@@ -181,21 +202,38 @@ def evaluate(resfile, testset, detail = False, n = 5, batch = False, cot = False
                     continue
             else:
                 predtype = TypeObject.Str2Obj(pred)
+
+            # if (exact and TypeObject.isIdenticalSet(gttype, predtype)) or (not exact and TypeObject.isSetIncluded2(predtype, gttype)):
+            #     matched = True
+            #     reses[r] = [results[r], testset[r][1]]
+            #     for i in range(index+1, n+1):
+            #         topn[i]["total"] += 1
+            #         topn[i][testset[r][2]] += 1
+            #         if testset[r][2].startswith("depth"):
+            #             topn[i]["generic"] += 1
+            #         topn[i][r.split("--")[-1]] += 1
+            #     break
             if (exact and TypeObject.isIdenticalSet(gttype, predtype)) or (not exact and TypeObject.isSetIncluded2(predtype, gttype)):
-                matched = True
-                reses[r] = [results[r], testset[r][1]]
-                for i in range(index+1, n+1):
-                    topn[i]["total"] += 1
-                    topn[i][testset[r][2]] += 1
-                    if testset[r][2].startswith("depth"):
-                        topn[i]["generic"] += 1
-                    topn[i][r.split("--")[-1]] += 1
-                break
+                try:
+                    parse_pred = parse_type_str(pred).normalized()
+                    parse_gt = parse_type_str(new_test["code_annotation"]).normalized()
+                except:
+                    continue
+                if parse_pred == parse_gt:
+                    matched = True
+                    reses[r] = [results[r], testset[r][1]]
+                    for i in range(index+1, n+1):
+                        topn[i]["total"] += 1
+                        topn[i][testset[r][2]] += 1
+                        if testset[r][2].startswith("depth"):
+                            topn[i]["generic"] += 1
+                        topn[i][r.split("--")[-1]] += 1
+                    break
     if res_file != None:
         with open(res_file, "w", encoding = "utf-8") as rf:
             rf.write(json.dumps(reses, sort_keys=True, indent=4, separators=(',', ': ')))
     if not batch:
-        print(f'Totally {len(results)} results, among them {empty} are empty.')
+        print(f'Totally {len(results)} results, among them {total_num} are specified.')
         print("Top-n acc:")
         for i in topn:
             print(f"top-{i}" , topn[i]["total"], topn[i]["total"] / total["total"])

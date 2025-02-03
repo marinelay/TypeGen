@@ -8,9 +8,30 @@ import base64
 import traceback
 import argparse
 from config import openai_keys, max_retry, error_sleep, normal_sleep, datafiles, chatgpt, gpt3
+from ollama import Client
+import requests
 
 api_index = 0
 
+MODELS = ['deepseek-r1:32b', 'phi4:14b', 'llama3.3:70b']
+ollama_url = "http://163.152.162.226:8000"
+
+def setup_models():
+    client = Client(host=ollama_url)
+    models = client.list()
+    existing_models = []
+    
+    for model in models['models']:
+        existing_models.append(model['model'])
+
+    for model in MODELS:
+        if model in existing_models:
+            print("Model {} already exists".format(model))
+            continue
+        print("Pulling model: {}".format(model))
+        response = client.pull(model)
+        print(response)
+    
 
 def construct_regular_prompt(item, ori_code, omit_type = False, usertypes = None):
     maps = {
@@ -48,12 +69,28 @@ def construct_cot_prompt(item, ori_code, omit_type = False, usertypes = None, mo
             prompt_str += "A: {}\n".format(item["cot"])
     else:
         if usertypes != None:
-            prompt_str = "Python code: \n {}\nAvailable user-defined types:\n {}\nQ: What is the type of {} {}?\n".format(ori_code, ", ".join(usertypes), maps[item['scope']], item['name'])
+            prompt_str = "Python code: \n {}\nAvailable user-defined types:\n {}\nQ: What is the type of {} {}? Please provide the top 10 type candidates.\n".format(ori_code, ", ".join(usertypes), maps[item['scope']], item['name'])
         else:
-            prompt_str = "Python code: \n {}\nQ: What is the type of {} {}?\n".format(ori_code, maps[item['scope']], item['name'])
+            prompt_str = "Python code: \n {}\nQ: What is the type of {} {}? Please provide the top 10 type candidates\n".format(ori_code, maps[item['scope']], item['name'])
         prompt_str += "A: "
     return prompt_str
 
+
+@timeout_decorator.timeout(60)
+def run_deepseek_r1(messages):
+    client = Client(host=ollama_url)
+    response = client.chat(
+        model="deepseek-r1:32b",
+        messages=messages,
+        options={
+            "max_tokens": 128,
+            "temperature": 1,
+            "top_p": 1.0,
+            "frequency_penalty": 0.0,
+            "presence_penalty": 0.0
+        }
+    )
+    return response
 
 # Timeout the query when it takes longer than 60s, the default timeout in request is too long (600s)
 @timeout_decorator.timeout(60)
@@ -83,8 +120,14 @@ def run_gpt3(prompt_str):
             )
 
 def run(data_folder, resfile, model, demo_num = 5, usertype = True, hop = 3, api_index = api_index, cont = False, fix_demo = False, cot = True, slice_code = True):
-    with open(os.path.join(data_folder, datafiles["testset_metadata"])) as f:
+    setup_models()
+    
+    with open(os.path.join(data_folder, datafiles["testset_sampled_metadata"])) as f:
         testset = json.load(f)
+
+    # filter only args and return
+    testset = [item for item in testset if item['scope'] == 'arg' or item['scope'] == 'return']
+
     if slice_code:
         with open(os.path.join(data_folder, datafiles["testset_sliced_sourcecode"].replace("HOP", str(hop)))) as f:
             test_source = json.load(f)
@@ -194,14 +237,18 @@ def run(data_folder, resfile, model, demo_num = 5, usertype = True, hop = 3, api
             prompt_str = prompt_str + question_str
             Flag_no_error = True
             num = 0
-            if model == "chatgpt":
+
+            if model == "chatgpt" or model == "deepseek-r1":
                 messages = [{"role": "user", "content": prompt_str}]
             while Flag_no_error and num < max_retry:
                 try:
                     if model == "chatgpt":
                         response = run_chatgpt(messages)
+                    elif model == "deepseek-r1":
+                        response = run_deepseek_r1(messages)
                     else:
                         response = run_gpt3(prompt_str)
+
                     Flag_no_error = False
                     num += 1
                     time.sleep(normal_sleep)
@@ -209,6 +256,8 @@ def run(data_folder, resfile, model, demo_num = 5, usertype = True, hop = 3, api
                     if model == "chatgpt":
                         for c in response["choices"]:
                             preds.append(c["message"]["content"])
+                    elif model == "deepseek-r1":
+                        preds.append(response["message"]["content"])
                     else:
                         for c in response["choices"]:
                             preds.append(c["text"])
@@ -245,7 +294,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-s', '--source', default = "data", type=str, help = "Path to the folder of source files")
     parser.add_argument('-r', '--res', required = True, type=str, help = "Path of output JSON file")
-    parser.add_argument('-m', '--model', required = False, default = 'chatgpt', type=str, help = "Model used in the inference, choose from chatgpt and gpt3")
+    parser.add_argument('-m', '--model', required = False, default = 'deepseek-r1', type=str, help = "Model used in the inference, choose from chatgpt and gpt3")
     parser.add_argument('-f', '--fix_demo', required = False, default = False, action="store_true", help = "Use fixed demonstrations")
     parser.add_argument("-o", '--no_slice', required = False, default = False, action = "store_true", help = "Do not use code slices")
     parser.add_argument('-c', '--remove_cot', required = False, default = False, action="store_true", help = "Remove COT prompts")
@@ -255,9 +304,10 @@ def main():
     parser.add_argument('-p', '--hop', required = False, default = 3, type=int, help = "Number of hops")
     args = parser.parse_args()
     try:
-        if openai_keys[0] == "key1":
-            raise ValueError()
-        openai.api_key = openai_keys[api_index]
+        if args.model == "chatgpt":
+            if openai_keys[0] == "key1":
+                raise ValueError()
+            openai.api_key = openai_keys[api_index]
     except:
         print("Error: please input the OpenAI keys in config.py first.")
         exit()
